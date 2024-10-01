@@ -1,51 +1,64 @@
 import yfinance as yf
-import pandas as pd
+import numpy as np
 
-# Retrieve Amazon's financial data
-ticker = "AMZN"
+# Define constants
+ticker = 'AMZN'
+tax_rate = 0.178  # Given tax rate
+discount_rate = 0.03  # Assumed discount rate (9%)
+perpetual_growth_rate = 0.02  # Assumed perpetual growth rate (2.5%)
+years = 5  # Projection for 5 years
+
+# Download the financial data for Amazon
 amazon = yf.Ticker(ticker)
+financials = amazon.financials
+cash_flow = amazon.cashflow
+balance_sheet = amazon.balance_sheet
+info = amazon.info
 
-# Get financials and cash flow data
-income_statement = amazon.financials.transpose()  # Income statement
-cash_flow = amazon.cashflow.transpose()  # Cash flow
-balance_sheet = amazon.balance_sheet.transpose()  # Balance sheet
+# Extract financial data from the correct labels
+revenue = financials.loc['Total Revenue'].iloc[0]
+operating_income = financials.loc['Operating Income'].iloc[0]
 
-# Extracting key data for FCFF calculation:
-# EBIT = Operating Income
-ebit = income_statement['EBIT'].iloc[0]
+# Correct key for Capital Expenditure and Depreciation
+capex = -cash_flow.loc['Capital Expenditure'].iloc[0]
+depreciation = cash_flow.loc['Depreciation Amortization Depletion'].iloc[0]
 
-# Tax rate (using income tax expense / pretax income as a proxy)
-tax_expense = income_statement['Income Tax Expense'].iloc[0]
-pretax_income = income_statement['Earnings Before Tax'].iloc[0]
-tax_rate = tax_expense / pretax_income if pretax_income != 0 else 0
+# Change in Working Capital
+change_in_working_capital = cash_flow.loc['Change In Working Capital'].iloc[0]
 
-# Depreciation (from cash flow statement)
-depreciation = cash_flow['Depreciation'].iloc[0]
+# Estimate Free Cash Flow (FCF)
+fcf = operating_income * (1 - tax_rate) + depreciation + capex - change_in_working_capital
 
-# CAPEX (from cash flow statement)
-capex = cash_flow['Capital Expenditures'].iloc[0]
+# Project FCF for 5 years with assumed growth rate (5%)
+fcf_growth_rate = 0.05  # Assume 5% growth in FCF
+fcf_projections = [(fcf * (1 + fcf_growth_rate) ** i) for i in range(1, years + 1)]
 
-# Change in Net Working Capital (NWC)
-# NWC = Current Assets - Current Liabilities
-current_assets = balance_sheet['Total Current Assets'].iloc[0]
-current_liabilities = balance_sheet['Total Current Liabilities'].iloc[0]
-nwc_current = current_assets - current_liabilities
+# Calculate Terminal Value (TV) at year 5
+terminal_value = (fcf_projections[-1] * (1 + perpetual_growth_rate)) / (discount_rate - perpetual_growth_rate)
 
-# Get previous year NWC to compute delta
-nwc_previous = balance_sheet['Total Current Assets'].iloc[1] - balance_sheet['Total Current Liabilities'].iloc[1]
-delta_nwc = nwc_current - nwc_previous
+# Discount FCF and Terminal Value to Present Value (PV)
+discounted_fcf = [fcf / (1 + discount_rate) ** i for i, fcf in enumerate(fcf_projections, 1)]
+discounted_terminal_value = terminal_value / (1 + discount_rate) ** years
 
-# FCFF Calculation
-fcff = ebit * (1 - tax_rate) + depreciation - capex - delta_nwc
+# Sum of discounted FCFs and Terminal Value gives the Enterprise Value (EV)
+enterprise_value = sum(discounted_fcf) + discounted_terminal_value
 
-# Display extracted data and FCFF result
-financial_data = pd.DataFrame({
-    'EBIT': [ebit],
-    'Tax Rate': [tax_rate],
-    'Depreciation': [depreciation],
-    'CAPEX': [capex],
-    'Delta NWC': [delta_nwc],
-    'FCFF': [fcff]
-})
+# Additional data: Cash, Debt, and Shares Outstanding
+cash = balance_sheet.loc['Cash And Cash Equivalents'].iloc[0]  # Corrected key for cash
+debt = balance_sheet.loc['Long Term Debt'].iloc[0]  # Corrected key for long-term debt
+shares_outstanding = info['sharesOutstanding']
 
-import ace_tools as tools; tools.display_dataframe_to_user(name="Amazon Financial Data and FCFF", dataframe=financial_data)
+# Calculate Equity Value
+equity_value = enterprise_value + cash - debt
+
+# Calculate Implied Share Price
+implied_share_price = equity_value / shares_outstanding
+
+# Output the results
+print(f"Projected Free Cash Flows (Years 1-5): {fcf_projections}")
+print(f"Terminal Value (TV): {terminal_value}")
+print(f"Discounted FCFs: {discounted_fcf}")
+print(f"Discounted Terminal Value: {discounted_terminal_value}")
+print(f"Enterprise Value (EV): {enterprise_value}")
+print(f"Equity Value: {equity_value}")
+print(f"Implied Share Price: ${implied_share_price:.2f}")

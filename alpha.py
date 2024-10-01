@@ -351,3 +351,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# TODO
+# combine variables like market return, beta, tax rates
+# try apply to [MAMAA] stocks with diff variables to achieve similar market prices
