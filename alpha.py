@@ -7,6 +7,8 @@ import plotly.io as pio
 from dotenv import load_dotenv
 from fredapi import Fred
 from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import make_pipeline
 
 # Set default renderer to browser
 pio.renderers.default = 'browser'
@@ -67,11 +69,11 @@ def calc_fcff(cash_flow_df, income_stmt_df):
     ocf = cash_flow_df['operatingCashflow']
     capex = cash_flow_df['capitalExpenditures']
     int_expense = income_stmt_df.get('interestExpense', 0)
-    tax_rate = 0.21
+    tax_rate = 0.178
     return ocf - capex + (int_expense * (1 - tax_rate))
 
 
-def calc_wacc(income_stmt_df, balance_sheet_df, risk_free_rate, market_return=0.08, beta=1.1, tax_rate=0.178):
+def calc_wacc(income_stmt_df, balance_sheet_df, risk_free_rate, market_return=0.08, beta=1.16, tax_rate=0.178):
     int_expense = income_stmt_df['interestExpense'].astype(float).iloc[-1]
     total_debt = balance_sheet_df['shortTermDebt'].fillna(0) + balance_sheet_df['longTermDebt'].fillna(0)
     total_debt = total_debt.iloc[-1]
@@ -89,11 +91,16 @@ def calc_terminal_value(fcff_last, wacc, terminal_growth_rate):
 
 # ------------ Projection and Discounting ------------
 def project_future_cash_flows(fcff_current, current_year, growth_rate, years):
+    """
+    Project future FCFF for a given number of years using the historical average growth rate.
+    The index will be set to the year-end date (e.g., 'YYYY-12-31').
+    """
     future_fcff = []
     for year in range(1, years + 1):
         projected_fcff = fcff_current * (1 + growth_rate) ** year
-        future_fcff.append({"Year": current_year + year, "Projected FCFF": projected_fcff})
-    return pd.DataFrame(future_fcff).set_index("Year")
+        year_end = pd.Timestamp(f'{current_year + year}-12-31')  # Set index to year-end
+        future_fcff.append({"Year End": year_end, "Projected FCFF": projected_fcff})
+    return pd.DataFrame(future_fcff).set_index("Year End")
 
 
 def discount_future_fcff(future_fcff_df, wacc):
@@ -107,40 +114,24 @@ def calc_equity_value(future_fcff_df, terminal_value, market_debt):
     equity_value = enterprise_value - market_debt
     return equity_value
 
-
 # ------------ Plotting with Plotly ------------
-def combine_fcff(fcff_df, projected_fcff_df, discounted_fcff_df):
+def combine_fcff(fcff_df, discounted_fcff_df):
     """
-    Combine historical FCFF with projected and discounted FCFF into one DataFrame.
-    Fill the FCFF column for the projected FCFF by reversing the discount.
+    Combine historical FCFF with PV of projected FCFF into one DataFrame.
     """
-    # Create historical FCFF DataFrame with 'FCFF' column and NaNs for 'Discount Factor' and 'PV of FCFF'
-    historical_fcff_df = fcff_df.to_frame(name='FCFF')
-    historical_fcff_df['Discount Factor'] = np.nan
-    historical_fcff_df['PV of FCFF'] = np.nan
+    # Rename 'PV of FCFF' in the projected FCFF DataFrame to 'FCFF' for consistency
+    projected_fcff_df = discounted_fcff_df[['PV of FCFF']].rename(columns={'PV of FCFF': 'FCFF'})
 
-    # Add the Discount Factor and PV of FCFF to the projected FCFF DataFrame
-    projected_fcff_df['Discount Factor'] = discounted_fcff_df['Discount Factor']
-    projected_fcff_df['PV of FCFF'] = discounted_fcff_df['PV of FCFF']
-
-    # Fill the 'FCFF' column in the projected FCFF DataFrame by reversing the discount
-    projected_fcff_df['FCFF'] = projected_fcff_df['PV of FCFF'] / projected_fcff_df['Discount Factor']
-
-    # Concatenate the historical and projected dataframes
-    combined_fcff_df = pd.concat([historical_fcff_df, projected_fcff_df])
+    # Concatenate historical FCFF and projected PV of FCFF
+    combined_fcff_df = pd.concat([fcff_df.to_frame(name='FCFF'), projected_fcff_df])
 
     return combined_fcff_df
 
 
-from sklearn.preprocessing import PolynomialFeatures
-from sklearn.pipeline import make_pipeline
-
-
 def plot_fcff_combined_with_financials(fcff_df, combined_fcff_df, income_stmt_df, balance_sheet_df):
     """
-    Plot combined historical FCFF with trend lines for both historical FCFF and combined FCFF using Polynomial Regression,
-    along with a bar chart for selected financial statement items (total assets, total liabilities, net income, total revenue),
-    and PV of FCFF.
+    Plot combined historical FCFF with trend lines for both historical FCFF and combined FCFF using Polynomial Regression (Degree 3),
+    Exponential Regression (ignoring non-positive FCFF values), Linear Regression, and a bar chart for selected financial statement items.
     """
     fig = go.Figure()
 
@@ -170,33 +161,64 @@ def plot_fcff_combined_with_financials(fcff_df, combined_fcff_df, income_stmt_df
         line=dict(color='red', dash='dot')
     ))
 
-    # Plot present value of FCFF (PV of FCFF)
-    projected_years = combined_fcff_df[combined_fcff_df['Discount Factor'].notna()].index
-    pv_fcff = combined_fcff_df.loc[projected_years, 'PV of FCFF']
+    # Plot combined FCFF (Historical + PV of FCFF for projected years)
+    combined_fcff_years = combined_fcff_df.index
+    combined_fcff_values = combined_fcff_df['FCFF'].values
+
     fig.add_trace(go.Scatter(
-        x=projected_years,
-        y=pv_fcff / 1e9,
+        x=combined_fcff_years,
+        y=combined_fcff_values / 1e9,
         mode='lines+markers',
-        name='PV of FCFF',
-        line=dict(color='green', dash='dot')
+        name='Combined FCFF',
+        line=dict(color='green')
     ))
 
-    # Add a polynomial trend line for combined FCFF (historical + projected)
+    # Polynomial regression model (degree=3 for more complexity)
     combined_years = np.arange(len(combined_fcff_df)).reshape(-1, 1)  # Time indices for combined FCFF
-    combined_fcff = combined_fcff_df['FCFF'].dropna().values  # Combined FCFF (historical + projected)
+    combined_fcff = combined_fcff_df['FCFF'].values  # Combined FCFF (historical + projected)
 
-    # Polynomial regression model (degree=2 for simplicity)
-    poly_model = make_pipeline(PolynomialFeatures(degree=2), LinearRegression())
+    poly_model = make_pipeline(PolynomialFeatures(degree=3), LinearRegression())
     poly_model.fit(combined_years, combined_fcff)
-    trend_line_combined = poly_model.predict(combined_years)  # Predicted trend line for combined FCFF
+    trend_line_combined_poly = poly_model.predict(combined_years)  # Predicted trend line for combined FCFF (degree 3)
 
-    # Plot the combined FCFF trend line (Polynomial Regression)
+    # Plot the combined FCFF polynomial trend line (Degree 3)
     fig.add_trace(go.Scatter(
         x=combined_fcff_df.index,
-        y=trend_line_combined / 1e9,
+        y=trend_line_combined_poly / 1e9,
         mode='lines',
-        name='Trend Line (Combined FCFF)',
+        name='Polynomial Trend Line (Degree 3 Combined FCFF)',
         line=dict(color='orange', dash='dash')
+    ))
+
+    # Exponential regression for combined FCFF (filtering out non-positive FCFF values)
+    positive_fcff_mask = combined_fcff > 0  # Filter out non-positive values
+    X_exp = combined_years[positive_fcff_mask].reshape(-1, 1)  # Use only the positive values for exponential regression
+    log_combined_fcff = np.log(combined_fcff[positive_fcff_mask])  # Take the log of positive FCFF values
+    exp_model = LinearRegression()
+    exp_model.fit(X_exp, log_combined_fcff)  # Fit the linear model to log-transformed FCFF
+    trend_line_exp = np.exp(exp_model.predict(combined_years))  # Revert the log to get exponential predictions
+
+    # Plot the combined FCFF exponential trend line
+    fig.add_trace(go.Scatter(
+        x=combined_fcff_df.index,
+        y=trend_line_exp / 1e9,
+        mode='lines',
+        name='Exponential Trend Line (Combined FCFF)',
+        line=dict(color='purple', dash='dot')
+    ))
+
+    # Add linear regression for combined FCFF (historical + projected)
+    lin_model_combined = LinearRegression()
+    lin_model_combined.fit(combined_years, combined_fcff)
+    trend_line_combined_lin = lin_model_combined.predict(combined_years)
+
+    # Plot the linear regression trend line for combined FCFF
+    fig.add_trace(go.Scatter(
+        x=combined_fcff_df.index,
+        y=trend_line_combined_lin / 1e9,
+        mode='lines',
+        name='Linear Trend Line (Combined FCFF)',
+        line=dict(color='brown', dash='solid')
     ))
 
     # Add bar charts for selected financial statement items (from Income Statement and Balance Sheet)
@@ -234,7 +256,7 @@ def plot_fcff_combined_with_financials(fcff_df, combined_fcff_df, income_stmt_df
 
     # Layout adjustments
     fig.update_layout(
-        title="Historical and Combined FCFF with Polynomial Trend Line, PV of FCFF, and Financial Statement Items (in Billions USD)",
+        title="Historical and Combined FCFF with Polynomial (Degree 3), Exponential, and Linear Trend Lines, PV of FCFF, and Financial Statement Items (in Billions USD)",
         xaxis_title="Year",
         yaxis_title="Value (Billions USD)",
         barmode='group',  # Group bars side by side
@@ -242,6 +264,7 @@ def plot_fcff_combined_with_financials(fcff_df, combined_fcff_df, income_stmt_df
     )
 
     fig.show()
+
 
 
 # ------------ Main Execution ------------
@@ -267,6 +290,7 @@ def main():
     # Calculate FCFF
     fcff_df = calc_fcff(cash_flow_df, income_stmt_df)
     print(f"\nFCFF (in Billions USD): {fcff_df / 1e9}")
+    print(f"\nSum of FCFF (in Billions USD): {fcff_df.sum() / 1e9}")
 
     # Fetch risk-free rate and long-term GDP growth rate
     risk_free_rate = get_5_year_treasury()
@@ -280,7 +304,7 @@ def main():
     fcff_latest = fcff_df.iloc[-1]
     current_year = fcff_df.index[-1].year
 
-    # Project future FCFF for 5 years
+    # Project future FCFF for 5 years with year-end index
     avg_growth_rate = fcff_df.pct_change().dropna().mean()
     projected_fcff_df = project_future_cash_flows(fcff_latest, current_year, avg_growth_rate, 5)
 
@@ -318,8 +342,8 @@ def main():
     # Display the implied share price
     print(f"\nImplied Share Price: ${implied_share_price:.2f}")
 
-    # Combine historical and projected FCFF
-    fcff_df_combined = combine_fcff(fcff_df, projected_fcff_df, discounted_fcff_df)
+    # Combine historical and projected FCFF (using PV of FCFF)
+    fcff_df_combined = combine_fcff(fcff_df, discounted_fcff_df)
 
     # Plot historical FCFF with trend lines, PV of FCFF, and financial statement items
     plot_fcff_combined_with_financials(fcff_df, fcff_df_combined, income_stmt_df, balance_sheet_df)
