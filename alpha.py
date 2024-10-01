@@ -177,7 +177,7 @@ def plot_fcff_combined_with_financials(fcff_df, combined_fcff_df, income_stmt_df
     combined_years = np.arange(len(combined_fcff_df)).reshape(-1, 1)  # Time indices for combined FCFF
     combined_fcff = combined_fcff_df['FCFF'].values  # Combined FCFF (historical + projected)
 
-    poly_model = make_pipeline(PolynomialFeatures(degree=3), LinearRegression())
+    poly_model = make_pipeline(PolynomialFeatures(degree=6), LinearRegression())
     poly_model.fit(combined_years, combined_fcff)
     trend_line_combined_poly = poly_model.predict(combined_years)  # Predicted trend line for combined FCFF (degree 3)
 
