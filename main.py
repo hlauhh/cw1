@@ -11,7 +11,6 @@ from sklearn.preprocessing import PolynomialFeatures
 from sklearn.pipeline import make_pipeline
 import threading
 import sys
-import time
 
 # Set default renderer to browser
 pio.renderers.default = 'browser'
@@ -49,7 +48,7 @@ def load_from_csv(file_name):
 
 
 # ------------ Data Fetching with CSV Backup ------------
-def fetch_data(api_key, function, symbol, report_type):
+def fetch_data(api_key, function, symbol, report_type, years_of_analysis=5):
     file_name = f"{symbol}_{function}_{report_type}.csv"
     try:
         params = {"function": function, "symbol": symbol, "apikey": api_key}
@@ -62,8 +61,8 @@ def fetch_data(api_key, function, symbol, report_type):
             df['fiscalDateEnding'] = pd.to_datetime(df['fiscalDateEnding'])
             df.set_index('fiscalDateEnding', inplace=True)
             df = df.sort_index(ascending=True)
-            # Keep only the last five years
-            df = df.tail(5)
+            # Keep only the specified number of years
+            df = df.tail(years_of_analysis)
             df = df.apply(pd.to_numeric, errors='coerce')
             save_to_csv(df, file_name)
             return df
@@ -334,26 +333,102 @@ def plot_fcff_combined_with_financials(symbol, fcff_df, combined_fcff_df, income
 
 
 # ------------ Timed Input Function ------------
-def timed_input(prompt, timeout=15, default="AMZN"):
+def timed_input(prompt, timeout=5, default="AMZN"):
     result = [default]  # Use list for mutable storage to capture input value
 
     def get_input():
-        user_input = input(prompt)  # Capture user input
-        result[0] = user_input.strip() if user_input.strip() else default  # Use default if input is empty
+        try:
+            user_input = input(prompt)  # Capture user input
+            result[0] = user_input.strip() if user_input.strip() else default  # Use default if input is empty
+        except EOFError:
+            # Handle edge case where input fails (e.g., during script execution in certain environments)
+            result[0] = default
 
-    input_thread = threading.Thread(target=get_input)  # Create a thread to wait for input
-    input_thread.daemon = True  # Set as daemon so it doesn't block program exit
+    # Create and start the input thread
+    input_thread = threading.Thread(target=get_input)
     input_thread.start()
-    input_thread.join(timeout)  # Wait for the specified timeout
 
-    if input_thread.is_alive():  # If the thread is still alive, timeout occurred
+    # Wait for the specified timeout (5 seconds)
+    input_thread.join(timeout)
+
+    if input_thread.is_alive():
         print(f"\nNo input within {timeout} seconds, proceeding with default '{default}'.")
+        # Ensure the thread doesn't linger, it should clean up automatically after the timeout
         return default
     else:
         return result[0]  # Return the captured input or default if empty
 
 
+# ------------ CAPM Market Return Calculation ------------
+def fetch_market_return(years_of_analysis=5):
+    index = "ACWI"  # Use ACWI ETF as a proxy for global equity market
+    file_name = f"{index}_MARKET_RETURN.csv"
+    try:
+        # Fetch market data (ACWI)
+        params = {
+            "function": "TIME_SERIES_DAILY_ADJUSTED",
+            "symbol": index,
+            "apikey": alpha_vantage_api_key,
+            "outputsize": "full"  # Get full historical data
+        }
+        response = requests.get(base_url, params=params)
+        data = response.json()
+
+        # Check if the API returned a note or error message
+        if "Note" in data:
+            raise RuntimeError("API call frequency exceeded. Please wait and try again later.")
+        if "Error Message" in data:
+            raise RuntimeError("Invalid API request. Please check your API key or symbol.")
+
+        # Ensure that 'Time Series (Daily)' is present in the response
+        if 'Time Series (Daily)' not in data:
+            print("Full API Response (Unexpected Format):")
+            print(data)  # Log full response for inspection
+            raise ValueError("Unexpected response format: 'Time Series (Daily)' missing.")
+
+        # Convert the time series into a DataFrame
+        time_series = data['Time Series (Daily)']
+        df = pd.DataFrame.from_dict(time_series, orient='index')
+        df.index = pd.to_datetime(df.index)  # Convert index to datetime
+        df = df.sort_index(ascending=True)  # Sort by date
+
+        # Calculate daily returns from adjusted close prices
+        df['adjusted_close'] = df['5. adjusted close'].astype(float)
+        df['daily_return'] = df['adjusted_close'].pct_change()
+
+        # Trim data to the last N years
+        start_date = pd.Timestamp.now() - pd.DateOffset(years=years_of_analysis)
+        df_filtered = df.loc[df.index >= start_date]
+
+        # Calculate average annual return
+        avg_annual_return = df_filtered['daily_return'].mean() * 252  # Approximate trading days in a year
+
+        save_to_csv(df_filtered, file_name)  # Save to CSV for backup
+        return avg_annual_return
+    except ValueError as e:
+        print(f"Error fetching market return data: {e}")
+        # Print detailed log for debugging
+        print("Debugging: API response format was unexpected or missing key data.")
+        # Continue to fallback
+        try:
+            # Load from CSV backup if API fails
+            return load_from_csv(file_name)['daily_return'].mean() * 252
+        except FileNotFoundError:
+            print(f"Backup CSV not found for {index} market return.")
+            return 0.08  # Default market return if unable to fetch
+    except Exception as e:
+        print(f"General error fetching market return data: {e}")
+        try:
+            # Load from CSV backup if API fails
+            return load_from_csv(file_name)['daily_return'].mean() * 252
+        except FileNotFoundError:
+            print(f"Backup CSV not found for {index} market return.")
+            return 0.08  # Default market return if unable to fetch
+
+
+
 # ------------ Main Execution ------------
+
 def main():
     try:
         # Prompt for ticker symbol with 5-second timeout, defaulting to AMZN if input is empty or timeout occurs
@@ -370,10 +445,10 @@ def main():
 
         print(f"\n{'='*60}\nProcessing {symbol} with {years_of_analysis} years of FCFF analysis\n{'='*60}")
 
-        # Fetch financial data from Alpha Vantage
-        income_stmt_df = fetch_data(alpha_vantage_api_key, "INCOME_STATEMENT", symbol, "Income Statement")
-        balance_sheet_df = fetch_data(alpha_vantage_api_key, "BALANCE_SHEET", symbol, "Balance Sheet")
-        cash_flow_df = fetch_data(alpha_vantage_api_key, "CASH_FLOW", symbol, "Cash Flow")
+        # Fetch financial data from Alpha Vantage for the specified number of years
+        income_stmt_df = fetch_data(alpha_vantage_api_key, "INCOME_STATEMENT", symbol, "Income Statement", years_of_analysis)
+        balance_sheet_df = fetch_data(alpha_vantage_api_key, "BALANCE_SHEET", symbol, "Balance Sheet", years_of_analysis)
+        cash_flow_df = fetch_data(alpha_vantage_api_key, "CASH_FLOW", symbol, "Cash Flow", years_of_analysis)
 
         # Display financial statements in billions
         print("\nIncome Statement (in Billions USD):")
@@ -403,6 +478,10 @@ def main():
         print(f"\nRisk-Free Rate (10-Year): {risk_free_rate:.4%}")
         print(f"Long-Term GDP Growth Rate (Terminal Growth Rate): {long_term_gdp_growth:.4%}")
 
+        # Fetch market return for the same time period
+        market_return = fetch_market_return(years_of_analysis=years_of_analysis)
+        print(f"Market Return (ACWI ETF (global equity index) over {years_of_analysis} years): {market_return:.4%}")
+
         # Get the last FCFF value and current year
         fcff_latest = fcff_df.iloc[-1]
         current_year = fcff_df.index[-1].year
@@ -425,12 +504,8 @@ def main():
             avg_growth_rate = fcff_growth_rates.mean()
             print(f"\nCalculated FCFF Growth Rate (Average): {avg_growth_rate:.2%}")
 
-
         # Project future FCFF for the specified number of years
         projected_fcff_df = project_future_cash_flows(fcff_latest, current_year, avg_growth_rate, years_of_analysis)
-
-        # Assume market return
-        market_return = 0.08
 
         # Calculate WACC
         wacc = calc_wacc(income_stmt_df, balance_sheet_df, risk_free_rate, market_return, beta, tax_rate)
@@ -472,4 +547,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"An error occurred: {e}")
+    finally:
+        # Ensure all threads are cleaned up (if any are running)
+        for thread in threading.enumerate():
+            if thread is not threading.main_thread():
+                thread.join()  # Wait for all threads to finish
+
+        sys.exit(0)  # Gracefully exit the program
