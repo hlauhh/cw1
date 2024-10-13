@@ -34,8 +34,7 @@ The main objective is to calculate the implied share price of a company based on
 ## FCFF Calculation Details
 
 ### Formula:
-\[ FCFF = 	ext{Operating Cash Flow} - 	ext{Capital Expenditures} + (	ext{Interest Expense} 	imes (1 - 	ext{Tax Rate})) \]
-
+FCFF = Operating Cash Flow - Capital Expenditures + Interest Expense * (1 - Tax Rate)
 - **Operating Cash Flow (OCF)**: This represents the cash generated from the company’s core business operations.
 - **Capital Expenditures (CapEx)**: These are investments in property, plant, and equipment, required to maintain and expand the company's operational capacity.
 - **Interest Expense**: Represents the cost of the company’s debt. It is adjusted for the tax shield since interest payments are tax-deductible.
